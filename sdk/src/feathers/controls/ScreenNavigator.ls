@@ -242,8 +242,8 @@ package feathers.controls
          * Determines how the screen navigator will set its own size when its
          * dimensions (width and height) aren't set explicitly.
          *
-         * @see #AUTO_SIZE_MODE_STAGE
-         * @see #AUTO_SIZE_MODE_CONTENT
+         * @see #!AUTO_SIZE_MODE_STAGE
+         * @see #!AUTO_SIZE_MODE_CONTENT
          */
         public function get autoSizeMode():String
         {
@@ -635,7 +635,6 @@ package feathers.controls
                     screen.owner = null;
                 }
 
-                trace("*** REMOVING CHILD " + _previousScreenInTransition + " canBeDisposed=" + canBeDisposed);
                 this.removeChild(this._previousScreenInTransition, canBeDisposed);
                 this._previousScreenInTransition = null;
                 this._previousScreenInTransitionID = null;

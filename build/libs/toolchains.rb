@@ -47,7 +47,6 @@ class Toolchain
     path = target.buildPath(self)
     FileUtils.mkdir_p(path)
     Dir.chdir(path) do
-      puts "cmake #{target.sourcePath} #{cmakeArgs(target)} #{target.flags(self)}"
       executeCommand("cmake #{target.sourcePath} #{cmakeArgs(target)} #{target.flags(self)}")
       executeCommand(buildCommand)
     end
@@ -96,6 +95,8 @@ class WindowsToolchain < Toolchain
   
     # Possible registry entries for Visual Studio
     regs = [
+      { name: 'Visual Studio 14', path: 'SOFTWARE\Microsoft\VisualStudio\14.0' },
+      { name: 'Visual Studio 14', path: 'SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0' },
       { name: 'Visual Studio 12', path: 'SOFTWARE\Microsoft\VisualStudio\12.0' },
       { name: 'Visual Studio 12', path: 'SOFTWARE\Wow6432Node\Microsoft\VisualStudio\12.0' },
       { name: 'Visual Studio 11', path: 'SOFTWARE\Microsoft\VisualStudio\11.0' },
@@ -105,6 +106,8 @@ class WindowsToolchain < Toolchain
     
     # Default directory fallbacks
     dirs = [
+      { name: 'Visual Studio 14', path: File.expand_path("#{ENV['programfiles']}\\Microsoft Visual Studio 14.0") },
+      { name: 'Visual Studio 14', path: File.expand_path("#{ENV['programfiles(x86)']}\\Microsoft Visual Studio 14.0") },
       { name: 'Visual Studio 12', path: File.expand_path("#{ENV['programfiles']}\\Microsoft Visual Studio 12.0") },
       { name: 'Visual Studio 12', path: File.expand_path("#{ENV['programfiles(x86)']}\\Microsoft Visual Studio 12.0") },
       { name: 'Visual Studio 11', path: File.expand_path("#{ENV['programfiles']}\\Microsoft Visual Studio 11.0") },
@@ -113,17 +116,23 @@ class WindowsToolchain < Toolchain
       { name: 'Visual Studio 10', path: File.expand_path("#{ENV['programfiles(x86)']}\\Microsoft Visual Studio 10.0") },
     ]
     
+    # VS2015 only supported on CMake >= 3.1
+    if version_outdated?($CMAKE_VERSION, '3.1')
+      regs.delete_if { |element| element[:name] == "Visual Studio 14" }
+      dirs.delete_if { |element| element[:name] == "Visual Studio 14" }
+    end
+
     # Check registry
     for reg in regs
       install = get_reg_value(reg[:path], 'ShellFolder')
-      if install
+      if install && File.exists?("#{install}VC\\vcvarsall.bat")
         return { name: reg[:name], install: install }
       end
     end
     
     # Check dirs
     for dir in dirs
-      if Dir.exists?(dir[:path])
+      if Dir.exists?(dir[:path]) && File.exists?("#{dir[:path]}\\VC\\vcvarsall.bat")
         return { name: dir[:name], install: dir[:path] }
       end
     end
@@ -230,7 +239,7 @@ class IOSToolchain < AppleToolchain
   end
   
   def buildCommand
-    return "xcodebuild -configuration #{CFG[:BUILD_TARGET]} CODE_SIGN_IDENTITY=\"#{@signAs}\" CODE_SIGN_RESOURCE_RULES_PATH=#{@sdkroot}/ResourceRules.plist"
+    return "xcodebuild -configuration #{CFG[:BUILD_TARGET]} CODE_SIGN_IDENTITY=\"#{@signAs}\""
   end
 
   def cmakeArgs(target)
@@ -239,13 +248,32 @@ class IOSToolchain < AppleToolchain
   
 end
 
-class LinuxToolchain
+class LinuxToolchain < Toolchain
+
+  def name
+    return "linux"
+  end
+
+  def buildCommand
+    return "make -j#{$HOST.num_cores}"
+  end
+
+  def makeConfig(target)
+    return {
+      CC: "gcc" + (target.is64Bit ? "" : " -m32")
+    }
+  end
+
+  def cmakeArgs(target)
+    return "-G \"Unix Makefiles\" -DCMAKE_BUILD_TYPE=#{CFG[:BUILD_TARGET]}"
+  end
+
 end
 
 class AndroidToolchain < Toolchain
 
   def buildCommand
-    return "cmake --build ."
+    return "cmake --build . -- -j#{$HOST.num_cores}"
   end
 
   def name
@@ -256,23 +284,44 @@ class AndroidToolchain < Toolchain
     
     return nil unless !target.is64Bit
     
-    systems = ["darwin-x86_64", "darwin-x86"]
+    if !ENV["ANDROID_NDK"]
+      abort "The environment variable ANDROID_NDK is not set. Please set it to the location of your Android NDK installation."
+    end
+
+    if $HOST.is_a? OSXHost then
+    	systems = ["darwin-x86_64", "darwin-x86"]
+    elsif $HOST.is_a? LinuxHost then
+        systems = ["linux-x86_64", "linux-x86"]
+    elsif $HOST.is_a? WindowsHost then
+        systems = ["windows-x86_64", "windowx-x86"]
+    else
+        abort "Unknown host for building Android through makefiles"
+    end
+
+    toolchains = ["arm-linux-androideabi-4.6", "arm-linux-androideabi-4.8", "arm-linux-androideabi-4.9"]
     
     # Android/ARM, armeabi-v7a (ARMv7 VFP), Android 4.0+ (ICS)
     ndk = File.expand_path(ENV["ANDROID_NDK"])
-    ndkABI = 14
-    ndkVersion = "#{ndk}/toolchains/arm-linux-androideabi-4.6"
+    ndkABI = CFG[:TARGET_ANDROID_SDK]
     ndkFound = false
     ndkSystems = []
-    for system in systems
-      ndkPath = "#{ndkVersion}/prebuilt/#{system}/bin/arm-linux-androideabi-"
-      ndkDir = File.dirname(ndkPath)
-      ndkSystems.push ndkDir
-      if File.exists?(ndkDir)
-        ndkFound = true
+    for toolchain in toolchains
+      ndkVersion = "#{ndk}/toolchains/#{toolchain}"
+      for system in systems
+        ndkPath = "#{ndkVersion}/prebuilt/#{system}/bin/arm-linux-androideabi-"
+        ndkDir = File.dirname(ndkPath)
+        ndkSystems.push ndkDir
+        if File.exists?(ndkDir)
+          ndkFound = true
+          break
+        end
+      end
+      
+      if ndkFound
         break
       end
     end
+
     abort "Android NDK prebuilt directory not found, tried:\n  #{ndkSystems.join("\n  ")}" unless ndkFound
     ndkFlags = "--sysroot #{ndk}/platforms/android-#{ndkABI}/arch-arm"
     ndkArch = "-march=armv7-a -mfloat-abi=softfp -Wl,--fix-cortex-a8"
@@ -295,7 +344,9 @@ class AndroidToolchain < Toolchain
       make_arg = ""
     end
 
-    return "-G \"#{generator}\" -DCMAKE_TOOLCHAIN_FILE=#{$ROOT}/build/cmake/loom.android.toolchain.cmake -DANDROID_NDK_HOST_X64=#{$HOST.is_x64} -DANDROID_ABI=armeabi-v7a -DANDROID_NATIVE_API_LEVEL=14 #{make_arg}"
+    nativeAPI = CFG[:TARGET_ANDROID_SDK]
+
+    return "-G \"#{generator}\" -DCMAKE_TOOLCHAIN_FILE=#{$ROOT}/build/cmake/loom.android.bootstrap.cmake -DANDROID_NDK_HOST_X64=#{$HOST.is_x64} -DANDROID_ABI=armeabi-v7a -DANDROID_NATIVE_API_LEVEL=#{nativeAPI} #{make_arg}"
   end
   
   def self.apkName()

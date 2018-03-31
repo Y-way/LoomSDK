@@ -140,6 +140,7 @@ class LoomProfiler
     LoomProfilerEntry *mCurrentLoomProfilerEntry;
     LoomProfilerEntry *mProfileList;
     LoomProfilerEntry *mRootLoomProfilerEntry;
+    loom_precision_timer_t mTimer;
 
     bool mEnabled;
     S32  mStackDepth;
@@ -187,8 +188,13 @@ struct LoomProfilerRoot
     F64                     mMinTime;
     U32                     mTotalInvokeCount;
     bool                    mEnabled;
+    bool                    mTelemetryVisited;
 
     static LoomProfilerRoot *sRootList;
+    static void* sRootLookup;
+    // Returns the profiler root with this name or a new one if one doesn't
+    // exist yet.  
+    static LoomProfilerRoot* fromName(const char *name);
 
     LoomProfilerRoot(const char *name);
 };
@@ -212,21 +218,11 @@ struct LoomProfilerEntry
     U32               mHash;
     U32               mSubDepth;
     U32               mInvokeCount;
-    loom_precision_timer_t mTimer;
+    F64               mStartTime;
     F64               mTotalTime;
     F64               mSubTime;
     F64               mMaxTime;
     F64               mMinTime;
-
-    LoomProfilerEntry()
-    {
-        mTimer = loom_startTimer();
-    }
-
-    ~LoomProfilerEntry()
-    {
-        loom_destroyTimer(mTimer);
-    }
 };
 
 
@@ -264,8 +260,8 @@ typedef void(*gLuaGC_callback)();
 typedef void*(*gLuaGC_callback_begin)();
 typedef void(*gLuaGC_callback_end)(void*);
 #define LUA_GC_SET(name) \
-    extern gLuaGC_callback_begin gLuaGC_ ## name ## _begin = lgc_ ## name ## _begin; \
-    extern gLuaGC_callback_end   gLuaGC_ ## name ## _end   = lgc_ ## name ## _end; \
+    gLuaGC_callback_begin gLuaGC_ ## name ## _begin = lgc_ ## name ## _begin; \
+    gLuaGC_callback_end   gLuaGC_ ## name ## _end   = lgc_ ## name ## _end; \
 
 #define LUA_GC_PROFILE_NAME_STR(name) "luaGC_" #name
 #define LUA_GC_PROFILE_NAME(name) luaGC_ ## name

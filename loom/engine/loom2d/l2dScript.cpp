@@ -151,7 +151,7 @@ static int registerLoom2D(lua_State *L)
        .addMethod("setTo", &Rectangle::setTo)
        .addMethod("clip", &Rectangle::clip)
 
-       .addMethod("clone", &Rectangle::clone)
+       .addLuaFunction("clone", &Rectangle::clone)
 
        .addMethod("toString", &Rectangle::toString)
 
@@ -195,6 +195,8 @@ static int registerLoom2D(lua_State *L)
        .addProperty("touchable", &DisplayObject::getTouchable, &DisplayObject::setTouchable)
 
        .addProperty("cacheAsBitmap", &DisplayObject::getCacheAsBitmap, &DisplayObject::setCacheAsBitmap)
+       .addProperty("cacheApplyScale", &DisplayObject::getCacheDoApplyScale, &DisplayObject::setCacheDoApplyScale)
+       .addProperty("cacheUseTexturesPot", &DisplayObject::getCacheUseTexturesPot, &DisplayObject::setCacheUseTexturesPot)
        .addMethod("invalidateBitmapCache", &DisplayObject::invalidateBitmapCache)
 
        .addProperty("depth", &DisplayObject::getDepth, &DisplayObject::setDepth)

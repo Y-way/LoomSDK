@@ -98,7 +98,7 @@ package
                 if (obj == null)
                     continue;
 
-                obj.rotation += time.deltaTime;
+                obj.rotation += 0.025;
             }
 
             // Calculate intensity based on time, this will make the quad pulsate
@@ -220,7 +220,7 @@ package
             loadFromAssets("assets/brightness.vert", "assets/brightness.frag");
 
             // Read and store uniform locations
-            // This shaderhas an additional uniform
+            // This shader has an additional uniform
             u_mvp_loc = getUniformLocation("u_mvp");
             v_texture_loc = getUniformLocation("u_texture");
             u_intensity_loc = getUniformLocation("u_intensity");

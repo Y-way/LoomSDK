@@ -107,9 +107,8 @@ static void initialize(int argc, const char **argv)
     // The rest will be passed on to the script
     utArray<utString> args;
 
-    assemblyPath = "";
-
     int argStart = 1;
+    bool foundAssembly = false;
 
     while (argStart < argc && strncmp(argv[argStart], "--", 2) == 0) {
         argSwitches.push_back(utString(argv[argStart]));
@@ -122,8 +121,9 @@ static void initialize(int argc, const char **argv)
     // look for passing a .loom file
     for (int i = argStart; i < argc; i++ )
     {
-        if (assemblyPath.size() == 0 && strstr(argv[i], ".loom"))
+        if (!foundAssembly && strstr(argv[i], ".loom"))
         {
+            foundAssembly = true;
             assemblyPath = argv[i];
         }
         else

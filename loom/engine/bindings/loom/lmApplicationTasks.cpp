@@ -20,6 +20,8 @@
 
 #include "loom/common/platform/platformTime.h"
 #include "loom/common/platform/platformHttp.h"
+#include "loom/common/platform/platformThread.h"
+#include "loom/common/platform/platformNetwork.h"
 #include "loom/common/core/performance.h"
 #include "loom/common/assets/assets.h"
 #include "loom/script/native/lsNativeDelegate.h"
@@ -27,17 +29,36 @@
 #include "loom/common/config/applicationConfig.h"
 #include "loom/engine/loom2d/l2dStage.h"
 #include "loom/graphics/gfxTexture.h"
-#include "loom/common/core/telemetry.h"
 
 lmDefineLogGroup(gTickLogGroup, "tick", true, LoomLogInfo)
 
 extern "C"
 {
 
+atomic_int_t gLoomTicking = 1;
+atomic_int_t gLoomPaused = 0;
+
 void loom_tick()
 {
-    Telemetry::beginTick();
-    
+    if (atomic_load32(&gLoomTicking) < 1)
+    {
+
+        // Signal that the app has really stopped execution
+        if (atomic_load32(&gLoomPaused) == 0)
+        {
+            atomic_store32(&gLoomPaused, 1);
+        }
+
+        // Sleep for longer while paused.
+        // Since graphics aren't running in a paused state, there is no yielding
+        // we would otherwise run in a busy loop without sleeping.
+        loom_thread_sleep(30);
+
+        return;
+    }
+
+    atomic_store32(&gLoomPaused, 0);
+
     LOOM_PROFILE_START(loom_tick);
 
     LSLuaState *vm = NULL;
@@ -74,6 +95,7 @@ void loom_tick()
     }
     
     loom_asset_pump();
+    loom_net_pump();
     
     platform_HTTPUpdate();
     
@@ -84,10 +106,6 @@ void loom_tick()
     finishProfilerBlock(&p);
     
     LOOM_PROFILE_END(loom_tick);
-    
-    LOOM_PROFILE_ZERO_CHECK()
-    
-    Telemetry::endTick();
 
 }
 }

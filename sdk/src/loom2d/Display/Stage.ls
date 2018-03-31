@@ -52,7 +52,6 @@ package loom2d.display
     delegate HardwareKeyDelegate();
     delegate TouchDelegate(touchId:int, x:int, y:int);
     delegate ScrollWheelDelegate(yDelta:int);
-    delegate AccelerationDelegate(x:Number, y:Number, z:Number);
 
     delegate OrientationChangeDelegate(newOrientation:int);
     delegate SizeChangeDelegate(newWidth:int, newHeight:int);
@@ -137,8 +136,6 @@ package loom2d.display
 
         public native var onScrollWheelYMoved:ScrollWheelDelegate;
 
-        public native var onAccelerate:AccelerationDelegate;
-
         public native var onOrientationChange:OrientationChangeDelegate;
         public native var onSizeChange:SizeChangeDelegate;
 
@@ -182,7 +179,7 @@ package loom2d.display
             // Application's TouchProcessor handles touch/mouse input.
             onScrollWheelYMoved += onScrollWheelHandler;
 
-            //layer.onKeyBackClicked += onKeyBackClicked;
+            onBackKey += onBackKeyHandler;
 
             // Show stats specified in config file
             /*if ( Cocos2D.configStats == Cocos2D.STATS_REPORT_FPS )
@@ -226,7 +223,7 @@ package loom2d.display
             broadcastEvent(new ScrollWheelEvent(ScrollWheelEvent.SCROLLWHEEL, delta));   
         }
 
-        protected function onKeyBackClickedHandler()
+        protected function onBackKeyHandler()
         {
             broadcastEvent(new KeyboardEvent(KeyboardEvent.BACK_PRESSED, 0, LoomKey.BUTTON_BACK));
         }

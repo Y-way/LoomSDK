@@ -65,6 +65,8 @@ namespace LS {
 // Delay in milliseconds between checks of file system.
 const int gFileCheckInterval = 100;
 
+static const int socketPingTimeoutMs = 6000;
+
 lmDefineLogGroup(gAssetAgentLogGroup, "agent", 1, LoomLogInfo);
 
 // The asset agent maintains a cache of all the local files and scans from time
@@ -205,11 +207,15 @@ static int makeAssetPathCanonical(const char *pathIn, char pathOut[MAXPATHLEN])
     pathOut[0] = 0;
 
     char cwd[MAXPATHLEN];
-    getcwd(cwd, MAXPATHLEN);
+    char* cwdres = getcwd(cwd, MAXPATHLEN);
 
+    char* resolvedPathPtr = NULL;
     // Note, man page suggests that realpath won't work right for
     // non-existant folders/files.
-    char *resolvedPathPtr = platform_realpath(pathIn, NULL);
+    if (cwdres != NULL)
+    {
+        resolvedPathPtr = platform_realpath(pathIn, NULL);
+    }
 
     if (resolvedPathPtr == NULL)
     {
@@ -568,7 +574,7 @@ static void processFileEntryDeltas(utArray<FileEntryDelta> *deltas)
             // Remove from the pending list.
             gPendingModifications.erase(i);
             i--;
-            
+
             continue;
         }
 
@@ -750,10 +756,22 @@ static int socketListeningThread(void *payload)
         {
             // Process the connections.
             loom_mutex_lock(gActiveSocketsMutex);
-
+            
             for (UTsize i = 0; i < gActiveHandlers.size(); i++)
             {
-                gActiveHandlers[i]->process();
+                AssetProtocolHandler* aph = gActiveHandlers[i];
+                aph->process();
+
+                // Check for ping timeout
+                int msSincePing = loom_readTimer(aph->lastActiveTime);
+                if (msSincePing > socketPingTimeoutMs)
+                {
+                    gActiveHandlers.erase(i);
+                    i--;
+                    lmLog(gAssetAgentLogGroup, "Client timed out (%x)", aph->socket);
+                    loom_net_closeTCPSocket(aph->socket);
+                    lmDelete(NULL, aph);
+                }
             }
 
             loom_mutex_unlock(gActiveSocketsMutex);
@@ -765,10 +783,10 @@ static int socketListeningThread(void *payload)
         lmLog(gAssetAgentLogGroup, "Client connected (%x)", acceptedSocket);
 
         loom_mutex_lock(gActiveSocketsMutex);
-        gActiveHandlers.push_back(new AssetProtocolHandler(acceptedSocket));
+        gActiveHandlers.push_back(lmNew(NULL) AssetProtocolHandler(acceptedSocket));
 
         AssetProtocolHandler *handler = gActiveHandlers.back();
-        handler->registerListener(new TelemetryListener());
+        handler->registerListener(lmNew(NULL) TelemetryListener());
         if (TelemetryServer::isRunning()) handler->sendCommand("telemetryEnable");
 
         // Send it all of our files.
@@ -845,7 +863,7 @@ void DLLEXPORT assetAgent_run(IdleCallback idleCb, LogCallback logCb, FileChange
     // Put best effort towards closing our listen socket when we shut down, to
     // avoid bugs on OSX where the OS won't release it for a while.
 
-#if LOOM_PLATFORM == LOOM_PLATFORM_OSX
+#if LOOM_PLATFORM == LOOM_PLATFORM_OSX || LOOM_PLATFORM == LOOM_PLATFORM_LINUX
     atexit(shutdownListenSocket);
     signal(SIGINT, shutdownListenSocketSignalHandler);
 #endif
@@ -858,15 +876,15 @@ void DLLEXPORT assetAgent_run(IdleCallback idleCb, LogCallback logCb, FileChange
     // Note callbacks.
     gLogCallback        = logCb;
     gFileChangeCallback = changeCb;
-    
-    
+
+
     utString *sdkPath = optionGet("sdk");
     if (sdkPath != NULL) TelemetryServer::setClientRootFromSDK(sdkPath->c_str());
     const char *ltcPath = getenv("LoomTelemetry");
     if (ltcPath != NULL) TelemetryServer::setClientRoot(ltcPath);
 
     if (optionEquals("telemetry", "true")) TelemetryServer::start();
-    
+
 
 
     // Set up the log callback.
@@ -915,6 +933,8 @@ void DLLEXPORT assetAgent_run(IdleCallback idleCb, LogCallback logCb, FileChange
             //free((void *)cqn->text);
             lmDelete(NULL, cqn);
         }
+        // Pump any remaining socket writes
+        loom_net_pump();
 
         // Poll at about 60hz.
         loom_thread_sleep(16);

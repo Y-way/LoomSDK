@@ -82,18 +82,25 @@
 // allocation with variably offset custom data fields
 #define LOOM_ALLOCATOR_ALIGN_MASK (8-1)
 
+// This should be a multiple of 16 - we need 16-byte alignment because of SSE
+#define LOOM_ALLOCATOR_METADATA_SIZE 16
+
+#include "loom/common/core/log.h"
+extern loom_logGroup_t gAllocatorLogGroup;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /************************************************************************
  * C ALLOCATION MACROS
- * 
+ *
  * Implement malloc/free/realloc type functionality using Loom allocators.
  ************************************************************************/
-#define lmAlloc(allocator, size) lmAlloc_inner(allocator, size, __FILE__, __LINE__)
-#define lmCalloc(allocator, count, size) lmCalloc_inner(allocator, count, size, __FILE__, __LINE__)
-#define lmFree(allocator, ptr) lmFree_inner(allocator, ptr, __FILE__, __LINE__)
+#define lmAlloc(allocator, size)           lmAlloc_inner(allocator, size, __FILE__, __LINE__)
+#define lmCalloc(allocator, count, size)   lmCalloc_inner(allocator, count, size, __FILE__, __LINE__)
+#define lmFree(allocator, ptr)             lmFree_inner(allocator, ptr, __FILE__, __LINE__)
+#define lmSafeFree(allocator, obj)         if (obj) { lmFree(allocator, obj); obj = NULL; }
 #define lmRealloc(allocator, ptr, newSize) lmRealloc_inner(allocator, ptr, newSize, __FILE__, __LINE__)
 
 #define lmAllocVerifyAll() loom_debugAllocator_verifyAll(__FILE__, __LINE__)
@@ -216,7 +223,7 @@ void loom_debugAllocator_verifyAll(const char* file, int line);
 * lmNew(someAllocator) Foo(), and delete myFoo becomes
 * lmDelete(someAllocator, myfoo). We do not support the delete[] or new[]
 * operators, if you want an array use the templated vector class.
-* 
+*
 * `obj` can change addresses after `loom_destructInPlace`, so we use
 * its return value, which is the original address, for freeing the memory.
 *
@@ -224,8 +231,6 @@ void loom_debugAllocator_verifyAll(const char* file, int line);
 #define lmNew(allocator)                new(allocator, __FILE__, __LINE__, (LS::FunctionDisambiguator*) NULL)
 #define lmDelete(allocator, obj)        { lmFree(allocator, loom_destructInPlace(obj)); }
 #define lmSafeDelete(allocator, obj)    if (obj) { lmFree(allocator, loom_destructInPlace(obj)); obj = NULL; }
-#define lmSafeFree(allocator, obj)      if (obj) { lmFree(allocator, obj); obj = NULL; }
-
 #include <new>
 
 namespace LS { struct FunctionDisambiguator {}; }
@@ -265,24 +270,78 @@ T* loom_destructInPlace(T *t)
     return t;
 }
 
-// Constructs a new array of types of length nr using the provided allocator (or NULL for default allocator)
-// Use this or utArray instead of lmNew for constructing arrays
-// The types are constructed in order using loom_constructInPlace
+// Array per-type properties, currently only used to determine which types
+// are fundamental to avoid constructing them.
+template<typename T> struct ArrayAlloc { enum { fundamental = false }; };
+template<typename T> struct ArrayAlloc<T*> { enum { fundamental = true }; };
+template<> struct ArrayAlloc<bool> { enum { fundamental = true }; };
+template<> struct ArrayAlloc<char> { enum { fundamental = true }; };
+template<> struct ArrayAlloc<wchar_t> { enum { fundamental = true }; };
+template<> struct ArrayAlloc<signed char> { enum { fundamental = true }; };
+template<> struct ArrayAlloc<short int> { enum { fundamental = true }; };
+template<> struct ArrayAlloc<int> { enum { fundamental = true }; };
+template<> struct ArrayAlloc<long int> { enum { fundamental = true }; };
+template<> struct ArrayAlloc<long long int> { enum { fundamental = true }; };
+template<> struct ArrayAlloc<unsigned char> { enum { fundamental = true }; };
+template<> struct ArrayAlloc<unsigned short int> { enum { fundamental = true }; };
+template<> struct ArrayAlloc<unsigned int> { enum { fundamental = true }; };
+template<> struct ArrayAlloc<unsigned long int> { enum { fundamental = true }; };
+template<> struct ArrayAlloc<unsigned long long int> { enum { fundamental = true }; };
+template<> struct ArrayAlloc<double> { enum { fundamental = true }; };
+template<> struct ArrayAlloc<long double> { enum { fundamental = true }; };
+
+// Injects array metadata of size LOOM_ALLOCATOR_METADATA_SIZE at the beginning
+// of an existing memory block. Returns a pointer to the first element
+template<typename T>
+static T* loom_newArray_inject(void* arr, unsigned int nr) {
+    lmSafeAssert(arr, "Unable to inject metadata into a null array. Probably out of memory while allocating.");
+    *(static_cast<unsigned int*>(arr)) = nr;
+    arr = reinterpret_cast<T*>(reinterpret_cast<size_t>(arr) + LOOM_ALLOCATOR_METADATA_SIZE);
+    return static_cast<T*>(arr);
+}
+
+// Allocate and inject an array of size nr
+template<typename T>
+static T* loom_newArray_alloc(loom_allocator_t *allocator, unsigned int nr)
+{
+    void* arr = (void*)lmAlloc(allocator, LOOM_ALLOCATOR_METADATA_SIZE + nr * sizeof(T));
+    return loom_newArray_inject<T>(arr, nr);
+}
+
+// Allocate, zero-initialize and inject an array of size nr
+template<typename T>
+static T* loom_newArray_calloc(loom_allocator_t *allocator, unsigned int nr)
+{
+    void* arr = (void*)lmCalloc(allocator, 1, LOOM_ALLOCATOR_METADATA_SIZE + nr * sizeof(T));
+    return loom_newArray_inject<T>(arr, nr);
+}
+
+// Constructs a new array of types of length nr using the provided allocator
+// (use NULL for the default allocator).
+//
+// Use this or utArray instead of lmNew for constructing arrays.
+// Non-fundamental types are constructed in order using loom_constructInPlace.
+// Fundamental types are zero-initialized.
 //
 // Note that this function may allocate slightly more memory than expected
-// as it has to remember the array length
+// as it has to remember the array length.
+//
 template<typename T>
 T* loom_newArray(loom_allocator_t *allocator, unsigned int nr)
 {
-    T* arr = (T*) lmAlloc(allocator, sizeof(unsigned int) + nr * sizeof(T));
-    lmSafeAssert(arr, "Unable to allocate additional memory in loom_newArray");
-    *((unsigned int*)arr) = nr;
-    arr = (T*)(((unsigned int*)arr) + 1);
-    for (unsigned int i = 0; i < nr; i++)
-    {
-        loom_constructInPlace<T>((void*) &arr[i]);
+    T* arr;
+
+    if (ArrayAlloc<T>::fundamental) {
+        arr = loom_newArray_calloc<T>(allocator, nr);
+    } else {
+        arr = loom_newArray_alloc<T>(allocator, nr);
+        for (unsigned int i = 0; i < nr; i++)
+        {
+            loom_constructInPlace<T>(&(arr[i]));
+        }
     }
-    return (T*) arr;
+
+    return arr;
 }
 
 // Deconstructs an array allocated with loom_newArray and frees the allocated memory
@@ -294,12 +353,14 @@ template<typename T>
 void loom_deleteArray(loom_allocator_t *allocator, T *arr)
 {
     if (arr == NULL) return;
-    void* fullArray = (void*) (((unsigned int*)arr) - 1);
-    unsigned int nr = *((unsigned int*)fullArray);
-    while (nr > 0)
-    {
-        nr--;
-        loom_destructInPlace<T>(&arr[nr]);
+    void* fullArray = reinterpret_cast<void *>(reinterpret_cast<size_t>(arr) - LOOM_ALLOCATOR_METADATA_SIZE);
+    unsigned int nr = *(static_cast<unsigned int*>(fullArray));
+    if (!ArrayAlloc<T>::fundamental) {
+        while (nr > 0)
+        {
+            nr--;
+            loom_destructInPlace<T>(&arr[nr]);
+        }
     }
     lmFree(allocator, fullArray);
 }

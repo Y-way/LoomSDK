@@ -22,7 +22,6 @@ endif()
 if (LINUX)
     set (APPLICATION_SRC
       ${APPLICATION_SRC}
-      linux/main.cpp
     )
 endif()
 
@@ -90,7 +89,13 @@ if (APPLE)
         if (LOOM_BUILD_ADMOB EQUAL 1)
             target_link_libraries(${PROJECT_NAME} 
                 "-framework AdSupport"
-                ${CMAKE_SOURCE_DIR}/loom/vendor/admob/lib/ios/libGoogleAdMobAds.a
+                "-framework EventKit"
+                "-framework EventKitUI"
+                "-framework CoreTelephony"
+                "-framework CoreMedia"
+                "-framework SafariServices"
+                "-framework CoreBluetooth"
+                "-framework GoogleMobileAds -F ${CMAKE_SOURCE_DIR}/loom/vendor/admob/ios"
             )
         endif()
         if (LOOM_BUILD_FACEBOOK EQUAL 1)
@@ -140,6 +145,8 @@ if (APPLE)
           "-framework AudioToolbox"
           "-framework CoreAudio"
 
+          "-framework GameController"
+
           "-ObjC"
           "-lc++"
 
@@ -153,7 +160,7 @@ if (APPLE)
           XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "iPhone Developer"
           XCODE_ATTRIBUTE_DEBUG_INFORMATION_FORMAT "dwarf-with-dsym"
           XCODE_ATTRIBUTE_INFOPLIST_PREPROCESS YES
-          XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET 5.1
+          XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET 5.1.1
           XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2" # Build a universal (iPad/iPhone) app.
           XCODE_ATTRIBUTE_COMBINE_HIDPI_IMAGES NO
           XCODE_ATTRIBUTE_ENABLE_BITCODE NO
@@ -266,7 +273,8 @@ elseif(LINUX)
        LoomScript
        LoomGraphics
        LoomCore
-       -lGL -lGLEW -lGLU -lglfw -lcurl
+       -lGL -lGLEW -lGLU -lcurl
+       "SDL2-static" "SDL2main" 
     )
 
     if (LOOM_BUILD_JIT EQUAL 1)
@@ -277,7 +285,7 @@ elseif(LINUX)
      
     add_custom_command(TARGET ${PROJECT_NAME}
         POST_BUILD
-        COMMAND mkdir -p ${ARTIFACTS_DIR}/
+        COMMAND mkdir -p ${ARTIFACTS_DIR}/bin
         COMMAND cp ${DEMOBIN} ${ARTIFACTS_DIR}/bin/LoomPlayer
     )
 

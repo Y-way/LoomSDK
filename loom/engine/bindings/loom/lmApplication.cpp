@@ -28,6 +28,7 @@ using namespace LS;
 #include "loom/common/assets/assetsScript.h"
 #include "loom/common/platform/platformNetwork.h"
 #include "loom/common/platform/platformWebView.h"
+#include "loom/common/platform/platformTime.h"
 
 #include "loom/script/common/lsLog.h"
 #include "loom/script/common/lsFile.h"
@@ -60,7 +61,10 @@ NativeDelegate LoomApplication::applicationActivated;
 NativeDelegate LoomApplication::applicationDeactivated;
 
 static bool initialAssetSystemLoaded = false;
+static int lastCameraRequestTimestamp = 0;
 
+// Ignore the camera requests for a 100ms after it's been triggered
+const int CAMERA_REQUEST_IGNORE_TIME = 100;
 
 lmDefineLogGroup(applicationLogGroup, "app", 1, LoomLogInfo);
 lmDefineLogGroup(scriptLogGroup, "script", 1, LoomLogInfo);
@@ -69,6 +73,8 @@ lmDefineLogGroup(scriptLogGroup, "script", 1, LoomLogInfo);
 extern "C" {
 
 extern void loomsound_shutdown();
+extern atomic_int_t gLoomTicking;
+extern atomic_int_t gLoomPaused;
 
 void loom_appInit(void)
 {
@@ -82,6 +88,48 @@ void loom_appSetup(void)
     GFX::Graphics::initialize();
 }
 
+void loom_appPause(void)
+{
+    // We need to have a counter here at least for one reason. Apart from
+    // background pausing, we also need to pause when the camera view is opened.
+    // Without a counter, this would break for the following control flow:
+    //
+    //      app -> camera -> background -> camera -> app
+    //
+    // Using a counter ensures that we only resume when our app view is shown,
+    // avoiding background OpenGL drawing crashes. 
+    int ticking = atomic_decrement(&gLoomTicking);
+    if (ticking != 0) return;
+
+    // Wait for the main thread to stop all GL execution
+    // if we're on a different thread
+    while (platform_getCurrentThreadId() != LS::NativeDelegate::smMainThreadID &&
+           atomic_load32(&gLoomPaused) != 1)
+    {
+        // Don't use up all the CPU
+        loom_thread_sleep(0);
+    }
+    platform_webViewPauseAll();
+
+    GFX::Graphics::pause();
+    lmLogInfo(applicationLogGroup, "Paused");
+}
+    
+void loom_appResume(void)
+{
+    // See loom_appPause for explanation of the counter
+    int ticking = atomic_increment(&gLoomTicking);
+    // Enforce sanity, cannot resume more times than we paused.
+    // This can happen when some devices start off with a resume event and
+    // some don't.
+    if (ticking > 1) atomic_compareAndExchange(&gLoomTicking, ticking, 1);
+    if (ticking != 1) return;
+    GFX::Graphics::resume();
+
+    platform_webViewResumeAll();
+
+    lmLogInfo(applicationLogGroup, "Resumed");
+}
 
 void loom_appShutdown(void)
 {
@@ -170,6 +218,8 @@ void LoomApplication::initMainAssembly()
     rootVM->readExecutableAssemblyBinaryHeader(initBytes);
     Assembly *assembly = BinReader::loadMainAssemblyHeader();
     LoomApplicationConfig::parseApplicationConfig(assembly->getLoomConfig());
+    
+    Loom2D::Stage::initFromConfig();
 }
 
 void LoomApplication::execMainAssembly()
@@ -182,8 +232,6 @@ void LoomApplication::execMainAssembly()
     initBytes = NULL;
     
     lmLogDebug(applicationLogGroup, "   o executing %s", bootAssembly.c_str());
-
-    Loom2D::Stage::updateFromConfig();
 
     // Wait for asset agent if appropriate.
     if (LoomApplicationConfig::waitForAssetAgent() > 0)
@@ -467,6 +515,16 @@ static utArray<LoomApplicationGenericEventCallbackNote> gNativeGenericCallbacks;
 
 void LoomApplication::fireGenericEvent(const char *type, const char *payload)
 {
+    if (strcmp(type, "cameraRequest") == 0)
+    {
+        int currentTime = platform_getMilliseconds();
+        int prevTime = lastCameraRequestTimestamp;
+        lastCameraRequestTimestamp = currentTime;
+
+        if (currentTime > prevTime && currentTime - prevTime < CAMERA_REQUEST_IGNORE_TIME)
+            return;
+    }
+
     event.pushArgument(type);
     event.pushArgument(payload);
     event.invoke();

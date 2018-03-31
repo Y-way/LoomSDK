@@ -40,7 +40,7 @@ CFG =
     TARGET_SDK_VER: "dev",
 
     # What version of the android SDK are going to target? Note you also need to update the Android project and manifest to match.
-    TARGET_ANDROID_SDK: "android-13" ,
+    TARGET_ANDROID_SDK: "15",
 
     # What Android target are we going to build? debug and release are the main
     # options but there are more. (see http://developer.android.com/tools/building/building-cmdline.html)
@@ -141,6 +141,7 @@ puts ""
 CLEAN.replace(["application/android/bin" ])
 CLEAN.include Dir.glob("build/loom-*")
 CLEAN.include Dir.glob("build/luajit-*")
+CLEAN.include Dir.glob("build/sdl2")
 CLEAN.include Dir.glob("tests/unittest-*")
 CLEAN.include ["build/**/lib/**", "artifacts/**"]
 CLOBBER.include ["**/*.loom", $OUTPUT_DIRECTORY]
@@ -189,10 +190,8 @@ namespace :generate do
 
       # Nuke all the garbage in the examples folders.
       Dir.glob("docs/output/examples/*/") do |exampleFolder|
-        FileUtils.rm_r "#{exampleFolder}/assets", :force => true
         FileUtils.rm_r "#{exampleFolder}/bin", :force => true
         FileUtils.rm_r "#{exampleFolder}/libs", :force => true
-        FileUtils.rm_r "#{exampleFolder}/src", :force => true
       end
 
       # make sure we don't accumulate junk in the artifacs/docs folder.
@@ -403,6 +402,16 @@ namespace :build do
     puts "== Building LuaJIT for OSX =="
     buildLuaJIT(MakeToolchain.new(OSXToolchain.new()), [:x86, :x86_64])
   end
+
+  desc "Build LuaJIT libraries for Linux"
+  task 'luajit:linux' do |t, args|
+    if $HOST.name != 'linux'
+      puts "LuaJIT Linux build only supported on Linux, skipping..."
+      next
+    end
+    puts "== Building LuaJIT for Linux =="
+    buildLuaJIT(MakeToolchain.new(LinuxToolchain.new()), if $HOST.is_x64 == '1' then [:x86_64] else [:x86] end)
+  end
   
   desc "Build LuaJIT libraries for iOS"
   task 'luajit:ios' do |t, args|
@@ -558,15 +567,12 @@ namespace :build do
       appName = appNameMatch[0]
       puts "Application name found: #{appName}"
 
-      # Use fruitstrap's plist.
-      sh "cp tools/fruitstrap/ResourceRules.plist #{appPath}/ResourceRules.plist"
 
       # Make it ito an IPA!
       full_output_path = Pathname.new("#{$OUTPUT_DIRECTORY}/ios-arm").realpath
       package_command = "/usr/bin/xcrun -sdk iphoneos PackageApplication"
       package_command += " -v '#{appPath}'"
       package_command += " -o '#{full_output_path}/#{appName}.ipa'"
-      package_command += " --sign '#{args.sign_as}'"
       package_command += " --embed '#{$iosProvision}'"
       sh package_command
 
@@ -582,7 +588,22 @@ namespace :build do
   desc "Builds Windows"
   task :windows => [] do
     puts "== Building Windows =="
+    
     toolchain = WindowsToolchain.new();
+
+    vs_bootstrap_call = ENV["LOOM_BOOTSTRAP_CALL"] == "true"
+    vs_install_env = ENV["VSINSTALLDIR"]
+
+    if !vs_install_env || vs_install_env.length == 0 then
+      abort "Unable to bootstrap the Visual Studio environment" unless !vs_bootstrap_call
+      puts "Visual Studio environment not detected, bootstrapping..."
+      vs_install = toolchain.get_vs_install
+      abort "Unable to find any Visual Studio installation" unless vs_install
+      vcvarsall = File.join(vs_install[:install], "VC\\vcvarsall.bat")
+      abort "Unable to find Visual Studio environment setup (vcvarsall.bat)" unless File.exists?(vcvarsall)
+      exec("build/windowsBootstrapVS.bat \"#{__FILE__}\" \"#{vcvarsall}\" \"#{ARGV.join(" ")}\"")
+    end
+    
     luajit_x86 = LuaJITTarget.new(:x86, $BUILD_TYPE);
     loom_x86 = LoomTarget.new(:x86, $BUILD_TYPE, luajit_x86);
     
@@ -603,14 +624,19 @@ namespace :build do
   desc "Builds Android APK"
   task :android => ['utility:compileScripts'] do
     puts "== Building Android =="
-
+    
+    ndk_env = ENV["ANDROID_NDK"]
+    ndk_path = ndk_env ? File.expand_path(ndk_env) : nil
+    
+    abort("\nAndroid NDK directory not found!\nPlease set the `ANDROID_NDK` environment variable to the Android NDK path.") unless ndk_path && File.exists?(ndk_path)
+    
     # Build SDL for Android if it's missing
     sdlLibPath = "build/sdl2/android/armeabi"
     if not File.exist?("#{sdlLibPath}/libSDL2.a")
       puts "Building SDL2 for Android using ndk-build"
       sdlSrcPath = "loom/vendor/sdl2"
       Dir.chdir(sdlSrcPath) do
-        sh "ndk-build SDL2_static NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=./Android.mk APP_PLATFORM=android-13" 
+        sh "#{ndk_path}/ndk-build SDL2_static NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=./Android.mk APP_PLATFORM=android-15"
       end
       FileUtils.mkdir_p sdlLibPath
       sh "cp #{sdlSrcPath}/obj/local/armeabi/libSDL2.a #{sdlLibPath}/libSDL2.a"
@@ -635,7 +661,7 @@ namespace :build do
       sh "android update project --name FacebookSDK --subprojects --target #{api_id} --path ."
     end
 
-    Dir.chdir("loom/engine/sdl2/platform/android/java") do
+    Dir.chdir("loom/engine/SDL2/platform/android/java") do
       sh "android update project --name SDL2 --subprojects --target #{api_id} --path ."
     end
 
@@ -668,20 +694,22 @@ namespace :build do
 
   desc "Builds Ubuntu Linux"
   task :ubuntu => [] do
-    puts "== Skipped Ubuntu =="
-
-    if false
 	
+    ensureLuaJIT("linux")
+
     puts "== Building Ubuntu =="
-    FileUtils.mkdir_p("#{$ROOT}/build/loom-linux-x86")
-    Dir.chdir("#{$ROOT}/build/loom-linux-x86") do
-      sh "cmake -DLOOM_BUILD_JIT=#{CFG[:USE_LUA_JIT]} -DLUA_GC_PROFILE_ENABLED=#{CFG[:ENABLE_LUA_GC_PROFILE]} -G \"Unix Makefiles\" -DCMAKE_BUILD_TYPE=#{CFG[:BUILD_TARGET]} #{$buildDebugDefine} #{$buildAdMobDefine} #{$buildFacebookDefine} #{$ROOT}"
-      sh "make -j#{$HOST.num_cores}"
-    end
+
+    arch = $HOST.is_x64 == '1' ? :x86_64 : :x86
+
+    # Just compile for native arch
+    toolchain = LinuxToolchain.new();
+    luajit = LuaJITTarget.new(arch, $BUILD_TYPE);
+    loom = LoomTarget.new(arch, $BUILD_TYPE, luajit);
+
+    toolchain.build(loom)
 
     Rake::Task["utility:compileScripts"].invoke
     Rake::Task["utility:compileTools"].invoke
-	end
 	
   end
 
@@ -704,7 +732,6 @@ task :test => ['build:desktop'] do
     sh "#{$ROOT}/tests/unittest-#{$HOST.arch}"
   end
   Dir.chdir("sdk") do
-    sh "#{$LSC_BINARY} TestExec.build"
     sh "#{$LSC_BINARY} Tests.build"
     sh "#{$LOOMEXEC_BINARY} --ignore-missing-types bin/TestExec.loom bin/Tests.loom"
   end
@@ -722,7 +749,7 @@ namespace :deploy do
     sdk_path = File.join("#{ENV['HOME']}/.loom", "sdks", args[:sdk_version])
 
     # Remove the previous version
-    FileUtils.rm_rf sdk_path if File.directory? sdk_path
+    rm_rf_persistent(sdk_path) if File.directory? sdk_path
     unzip_file("pkg/loomsdk.zip", sdk_path)
 
     puts "Installing sdk locally for loomcli under the name #{args[:sdk_version]}"
@@ -737,7 +764,7 @@ namespace :deploy do
     sdk_path = File.join("#{ENV['HOME']}/.loom", "sdks", args[:sdk_version])
 
     # Remove the previous version
-    FileUtils.rm_rf sdk_path if File.directory? sdk_path
+    rm_rf_persistent(sdk_path) if File.directory? sdk_path
     unzip_file("pkg/freesdk.zip", sdk_path)
 
     puts "Installing sdk locally for loomcli under the name #{args[:sdk_version]}"

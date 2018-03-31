@@ -37,15 +37,16 @@ utHashTable<utPointerHashKey, MethodAllocation> *LSProfiler::sortMethods = NULL;
 
 lmDefineLogGroup(gProfilerLogGroup, "profiler", 1, LoomLogInfo);
 
+static const char* primingPath = ".......";
+
 static inline void primeProfiler()
 {
-    const char       *path = ".......";
-    LoomProfilerRoot **prd = dynamicProfilerRoots[path];
+    LoomProfilerRoot **prd = dynamicProfilerRoots[primingPath];
 
     if (prd == NULL)
     {
-        dynamicProfilerRoots.insert(path, new LoomProfilerRoot(strdup(path)));
-        prd = dynamicProfilerRoots[path];
+        dynamicProfilerRoots.insert(primingPath, lmNew(NULL) LoomProfilerRoot(primingPath));
+        prd = dynamicProfilerRoots[primingPath];
     }
 
     gLoomProfiler->hashPush(*prd);
@@ -246,6 +247,7 @@ void LSProfiler::updateState(lua_State *L) {
     primeProfiler();
 
     methodStack.clear();
+    methodStack.reserve(128);
     clearAllocations();
 
     if (enabled)
@@ -259,7 +261,7 @@ void LSProfiler::updateState(lua_State *L) {
             if (!shouldFilterFunction(stack.peek(0)->getFullMemberName()))
             {
                 methodStack.push(stack.peek(0));
-                enterMethod(stack.peek(0)->getFullMemberName());
+                enterMethod(stack.peek(0));
             }
 
             stack.pop();
@@ -274,7 +276,7 @@ void LSProfiler::updateState(lua_State *L) {
 }
 
 
-void LSProfiler::enterMethod(const char *fullPath)
+void LSProfiler::enterMethod(MethodBase* method)
 {
     if (!isEnabled())
     {
@@ -283,35 +285,39 @@ void LSProfiler::enterMethod(const char *fullPath)
 
     //printf("Entering %s\n", fullPath);
 
-    LoomProfilerRoot **prd = dynamicProfilerRoots[fullPath];
-    if (prd == NULL)
+    if (method->profilerRoot == NULL)
     {
-        dynamicProfilerRoots.insert(fullPath, new LoomProfilerRoot(strdup(fullPath)));
-        prd = dynamicProfilerRoots[fullPath];
+        method->profilerRoot = LoomProfilerRoot::fromName(method->getFullMemberName());
     }
 
-    gLoomProfiler->hashPush(*prd);
+    gLoomProfiler->hashPush(method->profilerRoot);
 }
 
 
-void LSProfiler::leaveMethod(const char *fullPath)
+void LSProfiler::leaveMethod(MethodBase* method)
 {
     if (!isEnabled())
     {
         return;
     }
 
-    //printf("Leaving %s\n", fullPath);
-
-    LoomProfilerRoot **prd = dynamicProfilerRoots[fullPath];
-    lmAssert(prd, "Should never leave a method we didn't enter first!");
-    gLoomProfiler->hashPop(*prd);
+    lmAssert(method->profilerRoot, "Should never leave a method we didn't enter first!");
+    gLoomProfiler->hashPop(method->profilerRoot);
 }
 
 
 // Main lua VM debug hook
 void LSProfiler::profileHook(lua_State *L, lua_Debug *ar)
 {
+    // Only process calls from the main thread for now
+#ifdef LOOM_ENABLE_JIT
+    lua_State *mainL = mainthread(G(L));
+#else
+    lua_State *mainL = L->l_G->mainthread;
+#endif
+    if (mainL != L)
+        return;
+
     MethodBase *methodBase = NULL;
 
     if (ar->event == LUA_HOOKCALL)
@@ -321,7 +327,7 @@ void LSProfiler::profileHook(lua_State *L, lua_Debug *ar)
         if (methodBase)
         {
             methodStack.push(methodBase);
-            enterMethod(methodBase->getFullMemberName());
+            enterMethod(methodBase);
         }
     }
 
@@ -334,7 +340,7 @@ void LSProfiler::profileHook(lua_State *L, lua_Debug *ar)
             if (methodStack.size())
             {
                 methodStack.pop();
-                leaveMethod(methodBase->getFullMemberName());
+                leaveMethod(methodBase);
             }
         }
     }
@@ -347,7 +353,7 @@ void LSProfiler::dump(lua_State *L)
 
     while (methodStack.size())
     {
-        leaveMethod(methodStack.peek(0)->getFullMemberName());
+        leaveMethod(methodStack.peek(0));
         methodStack.pop();
     }
 
@@ -495,7 +501,7 @@ void LSProfiler::dumpAllocations(lua_State *L)
         
         lmLog(gProfilerLogGroup, "Total: %i (%i KiB), Alive: %i (%i KiB), Method: %s", ma.totalCount, ma.totalBytes/1024, ma.currentCount, ma.currentBytes/1024, methodBase->getFullMemberName());
         
-        SDL_qsort((void*)ma.allocations.ptr(), ma.allocations.size(), sizeof(LSProfilerTypeAllocation*), sortAllocsByTotal);
+        //SDL_qsort((void*)ma.allocations.ptr(), ma.allocations.size(), sizeof(LSProfilerTypeAllocation*), sortAllocsByTotal);
 
         for (UTsize j = 0; j < ma.allocations.size(); j++)
         {

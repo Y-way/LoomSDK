@@ -25,6 +25,9 @@
 
 #include "loom/common/core/telemetry.h"
 
+#include "loom/common/utils/utTypes.h"
+#include "loom/common/utils/utString.h"
+
 loom_allocator_t *gProfilerAllocator = NULL;
 
 // Enable the profiler from the start of execution. Enable this if you
@@ -119,7 +122,10 @@ void finishProfilerBlock(profilerBlock_t *block)
 #include "loom/common/core/stringTable.h"
 #include "loom/common/utils/utTypes.h"
 
+typedef utHashTable<utHashedString, LoomProfilerRoot*> LookupType;
+
 LoomProfilerRoot    *LoomProfilerRoot::sRootList = NULL;
+void*                LoomProfilerRoot::sRootLookup = (void*) (lmNew(NULL) LookupType());
 LoomProfiler        *gLoomProfiler = NULL;
 static LoomProfiler aProfiler; // allocate the global profiler
 
@@ -136,10 +142,6 @@ extern "C" {
 
 LoomProfiler::LoomProfiler()
 {
-#if !defined(LOOM_PLATFORM_IS_APPLE) && LOOM_PLATFORM != LOOM_PLATFORM_WIN32
-   clock_gettime(WHICH_CLOCK, &dawn); // Works on Linux
-#endif
-
    mMaxStackDepth = MaxStackDepth;
    mCurrentHash = 0;
 
@@ -159,6 +161,7 @@ LoomProfiler::LoomProfiler()
    mCurrentLoomProfilerEntry->mSubTime = 0;
    mCurrentLoomProfilerEntry->mMaxTime = 0;
    mCurrentLoomProfilerEntry->mMinTime = INFINITY;
+   mCurrentLoomProfilerEntry->mStartTime = 0.0;
    mRootLoomProfilerEntry = mCurrentLoomProfilerEntry;
 
    for(U32 i = 0; i < LoomProfilerEntry::HashTableSize; i++)
@@ -173,6 +176,8 @@ LoomProfiler::LoomProfiler()
    mStackDepth = 0;
    gLoomProfiler = this;
    mDumpToConsole   = false;
+
+   mTimer = loom_startTimer();
 }
 
 
@@ -181,6 +186,8 @@ LoomProfiler::~LoomProfiler()
    reset();
    lmSafeDelete(gProfilerAllocator, mRootLoomProfilerEntry);
    gLoomProfiler = NULL;
+
+   loom_destroyTimer(mTimer);
 }
 
 
@@ -225,18 +232,17 @@ void LoomProfiler::reset()
    mCurrentLoomProfilerEntry->mMinTime = INFINITY;
    mCurrentLoomProfilerEntry->mSubDepth = 0;
    mCurrentLoomProfilerEntry->mLastSeenProfiler = 0;
+
+   loom_resetTimer(mTimer);
 }
 
 
 LoomProfilerRoot::LoomProfilerRoot(const char *name)
 {
-    for (LoomProfilerRoot *walk = sRootList; walk; walk = walk->mNextRoot)
-    {
-        if (!strcmp(walk->mName, name))
-        {
-            lmAssert(false, "Duplicate profile name: %s", name);
-        }
-    }
+    LookupType* lookup = static_cast<LookupType*>(sRootLookup);
+    utHashedString key(name);
+    bool inserted = lookup->insert(key, this);
+    lmAssert(inserted, "Duplicate profile name: %s", name);
 
     mName                   = name;
     mNameHash               = (int)(long long)stringtable_insert(name); // Poor man's hash
@@ -249,8 +255,25 @@ LoomProfilerRoot::LoomProfilerRoot(const char *name)
     mTotalInvokeCount       = 0;
     mFirstLoomProfilerEntry = NULL;
     mEnabled                = true;
+    mTelemetryVisited       = false;
 }
 
+LoomProfilerRoot* LoomProfilerRoot::fromName(const char *name)
+{
+    LookupType* lookup = static_cast<LookupType*>(sRootLookup);
+    utHashedString key(name);
+    LoomProfilerRoot* root;
+    LoomProfilerRoot** rootp = lookup->get(key);
+    if (rootp == NULL)
+    {
+        root = lmNew(NULL) LoomProfilerRoot(name);
+    }
+    else
+    {
+        root = *rootp;
+    }
+    return root;
+}
 
 void LoomProfiler::validate()
 {
@@ -270,7 +293,7 @@ void LoomProfiler::validate()
                 }
             }
 
-            lmAssert(wk, "Validation failed - couldnot find child in its parent's list.");
+            lmAssert(wk, "Validation failed - couldn't find child in its parent's list.");
 
             for (wk = dp->mParent->mChildHash[walk->mNameHash & (LoomProfilerEntry::HashTableSize - 1)];
                  wk; wk = wk->mNextHash)
@@ -281,7 +304,7 @@ void LoomProfiler::validate()
                 }
             }
 
-            lmAssert(wk, "Valdation failed- couldn't find child in its parent's hash.");
+            lmAssert(wk, "Validation failed - couldn't find child in its parent's hash.");
         }
     }
 }
@@ -289,7 +312,7 @@ void LoomProfiler::validate()
 
 void LoomProfiler::hashPush(LoomProfilerRoot *root)
 {
-   Telemetry::beginTickTimer(root->mName);
+   Telemetry::beginTickTimer(root);
 
    mStackDepth++;
    lmAssert(mStackDepth <= (S32) mMaxStackDepth,
@@ -355,7 +378,7 @@ void LoomProfiler::hashPush(LoomProfilerRoot *root)
    root->mTotalInvokeCount++;
    nextProfiler->mInvokeCount++;
    
-   nextProfiler->mTimer = loom_startTimer();
+   nextProfiler->mStartTime = loom_readTimerNano(mTimer);
 
    mCurrentLoomProfilerEntry->mLastSeenProfiler = nextProfiler;
    mCurrentLoomProfilerEntry = nextProfiler;
@@ -370,7 +393,7 @@ void LoomProfiler::enable(bool enabled)
 
 void LoomProfiler::hashPop(LoomProfilerRoot *expected)
 {
-    Telemetry::endTickTimer(expected->mName);
+    Telemetry::endTickTimer(expected);
 
     mStackDepth--;
 
@@ -388,7 +411,7 @@ void LoomProfiler::hashPop(LoomProfilerRoot *expected)
             lmAssert(expected == mCurrentLoomProfilerEntry->mRoot, "LoomProfiler::hashPop - didn't get expected ProfilerRoot!");
         }
 
-        F64 fElapsed = loom_readTimerNano(mCurrentLoomProfilerEntry->mTimer);
+        F64 fElapsed = loom_readTimerNano(mTimer) - mCurrentLoomProfilerEntry->mStartTime;
 
         lmAssert(fElapsed >= 0, "Elapsed time should be positive - is %f", fElapsed);
 
@@ -412,11 +435,11 @@ void LoomProfiler::hashPop(LoomProfilerRoot *expected)
         if (mDumpToConsole)
         {
             dump();
-            mCurrentLoomProfilerEntry->mTimer = loom_startTimer();
+            mCurrentLoomProfilerEntry->mStartTime = loom_readTimerNano(mTimer);
         }
         if (!mEnabled && mNextEnable)
         {
-            mCurrentLoomProfilerEntry->mTimer = loom_startTimer();
+            mCurrentLoomProfilerEntry->mStartTime = loom_readTimerNano(mTimer);
         }
 
         mEnabled = mNextEnable;
@@ -584,7 +607,7 @@ void LoomProfiler::dump()
     lmLogInfo(gProfilerLogGroup, "Ordered by stack trace total time -");
     lmLogInfo(gProfilerLogGroup, "  %% Time %% NSTime  AvgTime  MaxTime  MinTime Invoke # Name");
 
-    mCurrentLoomProfilerEntry->mTotalTime = loom_readTimerNano(mCurrentLoomProfilerEntry->mTimer);
+    mCurrentLoomProfilerEntry->mTotalTime = loom_readTimerNano(mTimer);
 
     char depthBuffer[MaxStackDepth * 2 + 1];
     depthBuffer[0]    = 0;

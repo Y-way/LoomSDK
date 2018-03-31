@@ -158,7 +158,7 @@ void Texture::tick()
         if(!threadNote.path.empty())
         {
             //Texture is an Asset, so Create via handleAssetNotification
-            loom_asset_subscribe(threadNote.path.c_str(), Texture::handleAssetNotification, (void *)threadNote.id, 1);
+            loom_asset_subscribe(threadNote.path.c_str(), Texture::handleAssetNotification, (void *)(size_t)threadNote.id, 1);
             lmLogDebug(gGFXTextureLogGroup, "Async loaded texture '%s' took %i ms to create", threadNote.path.c_str(), platform_getMilliseconds() - startTime);
         }
         else
@@ -480,9 +480,12 @@ void Texture::upload(TextureInfo &tinfo, uint8_t *data, uint16_t width, uint16_t
 
             // Allocate buffer if it doesn't exist yet, reuse for smaller mipmaps
             if (mipData == NULL) {
+                int mipHalfWidth = mipWidth >> 1; mipHalfWidth = mipHalfWidth < 1 ? 1 : mipHalfWidth;
+                int mipHalfHeight = mipHeight >> 1; mipHalfHeight = mipHalfHeight < 1 ? 1 : mipHalfHeight;
+                int mipQuarterSize = mipHalfWidth*mipHalfHeight;
                 // Allocate enough for the biggest/current mipmap and a quarter of the size of
                 // additional space used for downsizing
-                mipData = static_cast<uint32_t*>(lmAlloc(NULL, mipSize * (4 + 1)));
+                mipData = static_cast<uint32_t*>(lmAlloc(NULL, (mipSize + mipQuarterSize)*sizeof(uint32_t)));
                 // The current mipmap bytes are the entire buffer minus the additional space
                 // at first, with the parent bytes being the full image size
                 mipCurrent = mipData;
@@ -510,7 +513,7 @@ void Texture::upload(TextureInfo &tinfo, uint8_t *data, uint16_t width, uint16_t
             mipLevel++;
         }
         lmLogDebug(gGFXTextureLogGroup, "Generated mipmaps in %d ms", platform_getMilliseconds() - time);
-        if (mipData != (uint32_t*)data) lmSafeFree(NULL, mipData);
+        if (mipData) lmSafeFree(NULL, mipData);
         LOOM_PROFILE_END(textureLoadMipmap);
     }
     else
@@ -570,7 +573,7 @@ TextureInfo *Texture::initFromAssetManager(const char *path)
         lmLogDebug(gGFXTextureLogGroup, "Loading %s", path);
 
         // Now subscribe and let us load for reals.
-        loom_asset_subscribe(path, Texture::handleAssetNotification, (void *)tinfo->id, 1);
+        loom_asset_subscribe(path, Texture::handleAssetNotification, (void *)(size_t)tinfo->id, 1);
     }
     else
     {
@@ -1117,7 +1120,7 @@ void Texture::reset()
             loom_asset_unlock(path);
 
             // Do actual texture creation/update
-            handleAssetNotification((void *)tinfo->id, path);
+            handleAssetNotification((void *)(size_t)tinfo->id, path);
         }
         else
         {
@@ -1188,6 +1191,8 @@ void Texture::setRenderTarget(TextureID id)
 {
     // TODO Gamma correct rendering? Render is lighter than it's supposed to be
     LOOM_PROFILE_SCOPE(textureSetRenderTarget);
+
+    // Finish render to back buffer and switch to FBO
     if (id != -1)
     {
         if (currentRenderTexture == id) return;
@@ -1210,13 +1215,14 @@ void Texture::setRenderTarget(TextureID id)
         Graphics::context()->glBindFramebuffer(GL_FRAMEBUFFER, tinfo->framebuffer);
 
         // Setup stage and framing
-        Graphics::setFlags(Graphics::getFlags() | Graphics::FLAG_INVERTED | Graphics::FLAG_NOCLEAR);
+        Graphics::setFlags(Graphics::getFlags() | Graphics::FLAG_INVERTED | Graphics::FLAG_NOCLEAR | Graphics::FLAG_PREMULTIPLIED_ALPHA);
         Graphics::setNativeSize(tinfo->width, tinfo->height);
 
         Graphics::applyRenderTarget();
 
         loom_mutex_unlock(Texture::sTexInfoLock);
     }
+    // Finish FBO render and switch to back buffer
     else if (currentRenderTexture != -1)
     {
         // Submit and reset state (order is important apparently)
@@ -1255,7 +1261,7 @@ void Texture::dispose(TextureID id)
         //TODO: LOOM-1653, we really shouldn't be holding a copy of the texture data in the
         // asset system until we dispose
         if (!tinfo->texturePath.empty()) {
-            loom_asset_unsubscribe(tinfo->texturePath.c_str(), handleAssetNotification, (void *)id);
+            loom_asset_unsubscribe(tinfo->texturePath.c_str(), handleAssetNotification, (void *)(size_t)id);
             loom_asset_flush(tinfo->texturePath.c_str());
 
             // Reset the hash, too
